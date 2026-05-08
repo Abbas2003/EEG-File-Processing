@@ -23,6 +23,7 @@ from eeg_pipeline import (
     # visualisation
     get_psd_plot, get_time_series_plot, get_topomap_fig,
     get_ica_components_fig, get_band_power_bar,
+    get_all_channels_stacked_fig,
     # analysis
     calculate_band_powers, get_channel_stats, infer_cognitive_state,
     # export
@@ -584,6 +585,59 @@ with tab_res:
             st.markdown("**Cleaned Time Series**")
             st.pyplot(get_time_series_plot(raw_c, duration=ts_duration, title="Cleaned — Time Series"),
                       use_container_width=True)
+
+        section_head("All Channels — Before vs After Processing")
+        st.markdown(
+            '<span style="color:#8b949e;font-size:0.88rem;">'
+            'Compare every channel at once. <b style="color:#d2a8ff;">Purple = Raw</b> '
+            '&nbsp;·&nbsp; <b style="color:#3fb950;">Green = Cleaned</b>'
+            '</span>',
+            unsafe_allow_html=True,
+        )
+
+        max_t = float(raw.times[-1])
+        col_start, col_dur = st.columns(2)
+        with col_start:
+            comp_start = st.slider(
+                "Start time (s)", 0.0, max(0.0, max_t - 1.0), 0.0,
+                step=0.5, key="comp_all_start",
+            )
+        with col_dur:
+            comp_dur = st.slider(
+                "Duration (s)", 1.0, min(30.0, max_t - comp_start), 5.0,
+                step=0.5, key="comp_all_dur",
+            )
+
+        col_before, col_after = st.columns(2)
+        with col_before:
+            st.markdown(
+                '<div style="text-align:center;padding:6px 0;">'
+                '<span class="nf-badge nf-badge-raw">● BEFORE PROCESSING</span></div>',
+                unsafe_allow_html=True,
+            )
+            with st.spinner("Rendering raw signals…"):
+                fig_raw = get_all_channels_stacked_fig(
+                    raw, comp_start, comp_dur,
+                    title="Raw Signal — All Channels",
+                    color='#d2a8ff',
+                )
+                st.pyplot(fig_raw, use_container_width=True)
+                plt.close(fig_raw)
+
+        with col_after:
+            st.markdown(
+                '<div style="text-align:center;padding:6px 0;">'
+                '<span class="nf-badge nf-badge-clean">● AFTER PROCESSING</span></div>',
+                unsafe_allow_html=True,
+            )
+            with st.spinner("Rendering cleaned signals…"):
+                fig_clean = get_all_channels_stacked_fig(
+                    raw_c, comp_start, comp_dur,
+                    title="Cleaned Signal — All Channels",
+                    color='#3fb950',
+                )
+                st.pyplot(fig_clean, use_container_width=True)
+                plt.close(fig_clean)
 
         section_head("Channel Statistics")
         with st.spinner("Computing statistics…"):

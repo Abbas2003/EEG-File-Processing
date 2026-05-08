@@ -207,6 +207,59 @@ def get_ica_components_fig(ica: mne.preprocessing.ICA, raw: mne.io.Raw) -> list[
     return figs
 
 
+def get_all_channels_stacked_fig(
+    raw: mne.io.Raw,
+    start: float = 0.0,
+    duration: float = 5.0,
+    title: str = "EEG Signals",
+    color: str = '#58a6ff',
+) -> plt.Figure:
+    """Plot ALL channels as vertically stacked subplots (like a classic EEG strip chart)."""
+    _dark_style()
+
+    n_ch = len(raw.ch_names)
+    sfreq = raw.info['sfreq']
+    start_idx = int(start * sfreq)
+    stop_idx  = int((start + duration) * sfreq)
+    stop_idx  = min(stop_idx, raw.n_times)
+
+    data = raw.get_data(start=start_idx, stop=stop_idx) * 1e6   # V → µV
+    n_samples = data.shape[1]
+    times = np.linspace(start, start + duration, n_samples)
+
+    fig_height = max(6, n_ch * 1.3)
+    fig, axes = plt.subplots(
+        n_ch, 1, figsize=(12, fig_height), facecolor='#0d1117',
+        sharex=True, gridspec_kw={'hspace': 0.05},
+    )
+    if n_ch == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        ax.set_facecolor('#0d1117')
+        ax.plot(times, data[i], color=color, linewidth=0.5, alpha=0.85)
+        ax.set_ylabel('µV', color='#8b949e', fontsize=7, labelpad=2)
+        ax.set_title(
+            raw.ch_names[i], color='#c9d1d9', fontsize=9,
+            fontweight='bold', loc='left', pad=2,
+        )
+        ax.spines[['top', 'right', 'bottom']].set_visible(False)
+        ax.tick_params(axis='y', colors='#8b949e', labelsize=7, length=2)
+        ax.tick_params(axis='x', colors='#8b949e', labelsize=7, length=2)
+        ax.grid(True, alpha=0.1, color='#30363d')
+
+    # Only show x-axis label on bottom subplot
+    axes[-1].spines['bottom'].set_visible(True)
+    axes[-1].set_xlabel('Time (s)', color='#8b949e', fontsize=9)
+
+    fig.suptitle(
+        title, color='#c9d1d9', fontsize=14, fontweight='bold',
+        fontfamily='monospace', y=1.0,
+    )
+    plt.tight_layout()
+    return fig
+
+
 def get_band_power_bar(band_powers: dict) -> plt.Figure:
     _dark_style()
     bands  = list(band_powers.keys())
@@ -324,5 +377,6 @@ def export_csv(raw: mne.io.Raw) -> bytes:
     df = raw.to_data_frame()
     df['time_ms'] = df['time'] * 1e3
     eeg_cols = [c for c in df.columns if c not in ['time', 'time_ms']]
-    df[eeg_cols] = df[eeg_cols] * 1e6
+    # df[eeg_cols] = df[eeg_cols] * 1e6
+    print(df[eeg_cols])
     return df[['time_ms'] + eeg_cols].to_csv(index=False).encode('utf-8')
