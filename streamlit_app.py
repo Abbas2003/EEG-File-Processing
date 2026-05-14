@@ -1,6 +1,6 @@
 """
 NeuroFlow — EEG Preprocessing & Analysis Dashboard
-Run:  streamlit run app.py
+Run:  streamlit run streamlit_app.py
 """
 
 import os
@@ -11,8 +11,10 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
+# pyrefly: ignore [missing-import]
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
 from eeg_pipeline import (
@@ -20,6 +22,7 @@ from eeg_pipeline import (
     load_raw_data,
     # preprocessing
     apply_filtering, run_ica_analysis, get_cleaned_data, full_pipeline,
+    check_signal_quality, get_preprocessing_report,
     # visualisation
     get_psd_plot, get_time_series_plot, get_topomap_fig,
     get_ica_components_fig, get_band_power_bar,
@@ -30,6 +33,13 @@ from eeg_pipeline import (
     export_clean_edf, export_excel, export_csv,
     # constants
     BAND_DESCRIPTIONS, BAND_COLORS,
+)
+
+from eeg_epochs import create_fixed_epochs, reject_bad_epochs, get_epoch_summary, epochs_to_array
+from eeg_features import extract_all_features, normalize_features
+from eeg_clustering import (
+    prepare_cluster_data, get_optimal_k, run_clustering, 
+    interpret_clusters, get_2d_projection, plot_clusters_2d, plot_timeline
 )
 
 
@@ -351,7 +361,7 @@ def fig_to_bytes(fig: plt.Figure) -> bytes:
 
 
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
-for key in ['raw_dict', 'active_file', 'pipeline_results']:
+for key in ['raw_dict', 'active_file', 'pipeline_results', 'feature_df', 'cluster_results']:
     if key not in st.session_state:
         st.session_state[key] = {} if key != 'active_file' else None
 
@@ -379,37 +389,64 @@ with st.sidebar:
     )
 
     if uploaded_files:
+        if 'processed_files' not in st.session_state:
+            st.session_state.processed_files = set()
+            
         for uf in uploaded_files:
-            if uf.name not in st.session_state.raw_dict:
+            file_key = f"{uf.name}_{uf.size}"
+            if file_key not in st.session_state.processed_files:
                 with tempfile.NamedTemporaryFile(suffix=".edf", delete=False) as tmp:
                     tmp.write(uf.read())
                     tmp_path = tmp.name
                 try:
                     with st.spinner(f"Loading {uf.name}…"):
                         raw = load_raw_data(tmp_path)
-                    st.session_state.raw_dict[uf.name] = {
-                        "raw": raw, "tmp_path": tmp_path
-                    }
+                    
+                    display_name = uf.name
+                    counter = 1
+                    while display_name in st.session_state.raw_dict:
+                        stem = Path(uf.name).stem
+                        ext = Path(uf.name).suffix
+                        display_name = f"{stem}_{counter}{ext}"
+                        counter += 1
+                        
+                    st.session_state.raw_dict[display_name] = {"raw": raw, "tmp_path": tmp_path}
+                    st.session_state.processed_files.add(file_key)
+                    if not st.session_state.get('active_file'):
+                        st.session_state.active_file = display_name
                 except Exception as e:
                     st.error(f"❌ {uf.name}: {e}")
+
+    # Validate Active File BEFORE showing selection widget
+    if st.session_state.raw_dict:
+        if not st.session_state.get('active_file') or st.session_state.active_file not in st.session_state.raw_dict:
+            st.session_state.active_file = list(st.session_state.raw_dict.keys())[0]
 
     if st.session_state.raw_dict:
         st.markdown("---")
         st.markdown("### 🗂 Loaded Files")
         file_names = list(st.session_state.raw_dict.keys())
-        active = st.radio(
-            "Select file to analyse:",
-            file_names,
-            index=file_names.index(st.session_state.active_file)
-            if st.session_state.active_file in file_names else 0,
-            label_visibility="collapsed",
-        )
-        st.session_state.active_file = active
+        
+        # Manual selection to avoid st.session_state.key conflicts
+        try:
+            current_idx = file_names.index(st.session_state.active_file)
+        except (ValueError, KeyError):
+            current_idx = 0
+            
+        if len(file_names) > 5:
+            new_selection = st.selectbox("Select file to analyse:", file_names, index=current_idx)
+        else:
+            new_selection = st.radio("Select file to analyse:", file_names, index=current_idx)
+        
+        # Update active_file manually
+        st.session_state.active_file = new_selection
 
         if st.button("🗑 Clear All Files"):
+            # Clear everything safely
             st.session_state.raw_dict = {}
             st.session_state.active_file = None
             st.session_state.pipeline_results = {}
+            st.session_state.processed_files = set()
             st.rerun()
 
     # ── Pipeline settings ──
@@ -423,25 +460,19 @@ with st.sidebar:
 
 
 # ── MAIN AREA ─────────────────────────────────────────────────────────────────
-if not st.session_state.raw_dict:
-    st.markdown("""
-    <div style="text-align:center;padding:5rem 2rem;color:#8b949e;">
-        <div style="font-size:3rem;margin-bottom:1rem;">🧠</div>
-        <div style="font-family:'Space Mono',monospace;font-size:1.1rem;color:#e6edf3;">
-            Upload one or more EDF files to begin
-        </div>
-        <div style="font-size:0.85rem;margin-top:0.5rem;">
-            Use the sidebar on the left to import your EEG recordings
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+af = st.session_state.active_file
+
+# Robust Fallback: If af is None but we have files, pick the first one locally
+if not af and st.session_state.raw_dict:
+    af = list(st.session_state.raw_dict.keys())[0]
+
+if not st.session_state.raw_dict or not af:
+    st.info("📂 Please upload an EDF file in the sidebar to begin analysis.")
     st.stop()
 
-
-# ── ACTIVE FILE ───────────────────────────────────────────────────────────────
-af    = st.session_state.active_file
+# ── ACTIVE FILE DATA ──────────────────────────────────────────────────────────
 raw   = st.session_state.raw_dict[af]["raw"]
-res   = st.session_state.pipeline_results.get(af, {})   # cleaned results if run
+res   = st.session_state.pipeline_results.get(af, {})
 raw_c = res.get("raw_clean")
 ica   = res.get("ica")
 
@@ -471,10 +502,12 @@ else:
 st.markdown("---")
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
-tab_raw, tab_pre, tab_res, tab_cog, tab_exp = st.tabs([
+tab_raw, tab_pre, tab_res, tab_feat, tab_clus, tab_cog, tab_exp = st.tabs([
     "📶  Raw Signal",
     "🛠  Preprocessing",
     "✨  Results",
+    "🔬  Feature Extraction",
+    "🧩  Clustering",
     "🧠  Cognitive Analysis",
     "📥  Export",
 ])
@@ -536,7 +569,7 @@ with tab_pre:
             st.write(f"⚙️  Notch filter: {notch_freq} Hz")
 
             st.write("⚙️  Fitting ICA — this may take a moment…")
-            ica_result = run_ica_analysis(raw_f, threshold=ica_thresh)
+            ica_result, ica_report = run_ica_analysis(raw_f, threshold=ica_thresh)
 
             n_exc = len(ica_result.exclude)
             st.write(f"✅  Detected {n_exc} artifact component{'s' if n_exc != 1 else ''}")
@@ -547,6 +580,7 @@ with tab_pre:
             st.session_state.pipeline_results[af] = {
                 "raw_clean": raw_clean_result,
                 "ica":       ica_result,
+                "ica_report": ica_report
             }
             status.update(label="✅ Pipeline complete!", state="complete")
 
@@ -568,6 +602,13 @@ with tab_res:
             f'<b style="color:#f78166;">{n_exc}</b> artifact component(s) via ICA.</span>',
             unsafe_allow_html=True,
         )
+        
+        # ICA Audit Report Table
+        ica_report = res.get("ica_report", [])
+        if ica_report:
+            st.markdown("#### 📋 Artifact Audit Report")
+            st.dataframe(pd.DataFrame(ica_report), use_container_width=True, hide_index=True)
+            st.caption("Statistical confidence is based on the correlation and variance Z-scores.")
 
         with st.expander("🔍 View ICA Components", expanded=False):
             with st.spinner("Rendering components…"):
@@ -644,10 +685,154 @@ with tab_res:
             stats_df = get_channel_stats(raw_c)
         st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
+        section_head("Data Quality Report")
+        quality_report = check_signal_quality(raw_c)
+        q_cols = st.columns(3)
+        for i, (ch, meta) in enumerate(quality_report.items()):
+            with q_cols[i % 3]:
+                st.markdown(f"**{ch}**: {meta['status']} (σ={meta['std_uv']} µV)")
+
+        pre_report = get_preprocessing_report(raw, raw_c, ica)
+        st.info(f"✨ Signal cleaning reduced RMS by **{pre_report['rms_reduction_pct']}%** "
+                f"after removing **{pre_report['artifact_components_removed']}** ICA components.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 4 · COGNITIVE ANALYSIS
+# TAB 4 · FEATURE EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
+with tab_feat:
+    if not raw_c:
+        st.info("Run the preprocessing pipeline first to extract features.")
+    else:
+        section_head("Feature Extraction Engine")
+        
+        st.markdown("""
+        <div style="background:#161b22;border:1px solid #21262d;border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:1rem;">
+        <span style="color:#8b949e;font-size:0.88rem;">
+        Extracting ~370 features per 4s window (50% overlap):<br>
+        • Time Domain (RMS, Skew, Hjorth)<br>
+        • Frequency Domain (Band Powers, Ratios)<br>
+        • Non-Linear (Entropy, Fractal Dim)<br>
+        • Cognitive (FAA, Engagement Index)
+        </span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if st.button("🚀 Extract All Features", key="run_feat"):
+            with st.status("Epoching & Extracting...") as status:
+                st.write("⚙️ Segmenting into 4s epochs...")
+                epochs, attempted = create_fixed_epochs(raw_c)
+                epochs = reject_bad_epochs(epochs)
+                summary = get_epoch_summary(epochs, attempted)
+                st.write(f"✅ Created {summary['kept_epochs']} clean epochs (dropped {summary['dropped_epochs']})")
+                
+                st.write("⚙️ Computing features (370 per epoch)...")
+                df_feat = extract_all_features(epochs)
+                st.session_state.feature_df[af] = df_feat
+                
+                # Save summary for persistence
+                st.session_state.feature_df[f"{af}_stats"] = summary
+                
+                status.update(label=f"✅ Done! ({summary['rejection_rate_pct']}% dropped)", state="complete")
+            st.rerun()
+
+        if af in st.session_state.feature_df:
+            df = st.session_state.feature_df[af]
+            stats = st.session_state.feature_df.get(f"{af}_stats", {"kept": 0, "dropped": 0, "retention": 0})
+            
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                metric_card("CLEAN DATA", f"{stats['kept_epochs']} Epochs", "Used for ML")
+            with c2:
+                metric_card("REJECTED", f"{stats['dropped_epochs']} Epochs", "Artifacts found")
+            with c3:
+                ret = 100 - stats['rejection_rate_pct']
+                color = "green" if ret > 75 else "orange" if ret > 50 else "red"
+                metric_card("RETENTION", f"{ret:.1f}%", f"Quality: {color.upper()}")
+            
+            if stats.get('dropped_epochs', 0) > 0:
+                st.warning(f"⚠️ **Drop Reasons:** {stats.get('drop_reasons', 'Unknown')}")
+                st.info(f"Attempted {stats.get('total_epochs')} epochs, but only {stats.get('kept_epochs')} were valid.")
+
+            st.markdown("---")
+            st.success(f"Extracted {len(df)} feature vectors from high-quality EEG segments.")
+            
+            with st.expander("📊 View Feature Matrix (First 100 columns)", expanded=False):
+                st.dataframe(df.iloc[:, :100], use_container_width=True)
+            
+            col_sel1, col_sel2 = st.columns(2)
+            with col_sel1:
+                f_target = st.selectbox("Select feature to visualize", df.columns[3:])
+            with col_sel2:
+                st.markdown(f"**Average {f_target}:** {df[f_target].mean():.4f}")
+                
+            fig_hist, ax_hist = plt.subplots(figsize=(10, 3), facecolor='#0d1117')
+            ax_hist.set_facecolor('#161b22')
+            ax_hist.hist(df[f_target], bins=20, color='#58a6ff', edgecolor='#30363d')
+            ax_hist.set_title(f"Distribution of {f_target}", color='#c9d1d9')
+            ax_hist.tick_params(colors='#8b949e')
+            st.pyplot(fig_hist)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 · CLUSTERING
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_clus:
+    if af not in st.session_state.feature_df:
+        st.info("Extract features first to perform clustering.")
+    else:
+        df_feat = st.session_state.feature_df[af]
+        section_head("Unsupervised State Discovery")
+        
+        col_c1, col_c2 = st.columns([1, 2])
+        with col_c1:
+            n_clus = st.slider("Target Clusters (K)", 2, 6, 3)
+            run_clus = st.button("🚀 Run Clustering", use_container_width=True)
+        
+        if run_clus:
+            with st.spinner("Analyzing patterns..."):
+                x_scaled, x_pca, pca, scaler = prepare_cluster_data(df_feat)
+                labels, model = run_clustering(x_scaled, n_clusters=n_clus)
+                x_2d = get_2d_projection(x_scaled)
+                
+                # Auto-interpretation
+                cluster_map = interpret_clusters(df_feat, labels)
+                
+                st.session_state.cluster_results[af] = {
+                    "labels": labels,
+                    "x_2d": x_2d,
+                    "map": cluster_map,
+                    "x_scaled": x_scaled
+                }
+            st.rerun()
+
+        if af in st.session_state.cluster_results:
+            c_res = st.session_state.cluster_results[af]
+            labels = c_res["labels"]
+            x_2d = c_res["x_2d"]
+            cmap = c_res["map"]
+            
+            section_head("Cluster Interpretation")
+            i_cols = st.columns(len(cmap))
+            for i, (cid, state) in enumerate(cmap.items()):
+                with i_cols[cid]:
+                    metric_card(f"CLUSTER {cid}", state, f"{np.sum(labels==cid)} epochs")
+
+            col_v1, col_v2 = st.columns(2)
+            with col_v1:
+                st.pyplot(plot_clusters_2d(x_2d, labels, cluster_names=cmap), use_container_width=True)
+            with col_v2:
+                # Feature importance (simplified: largest diff in means)
+                st.markdown("**Top Discriminating Features**")
+                df_temp = df_feat.copy()
+                df_temp['cluster'] = labels
+                importance = df_temp.groupby('cluster').mean().std().sort_values(ascending=False).head(10)
+                st.dataframe(importance, use_container_width=True)
+
+            section_head("Cognitive State Timeline")
+            # Get times from feature df
+            times = df_feat['time_start'].values
+            st.pyplot(plot_timeline(labels, times, cluster_names=cmap), use_container_width=True)
 with tab_cog:
     data_for_cog = raw_c if raw_c else raw
 
@@ -657,7 +842,20 @@ with tab_cog:
     section_head("Frequency Band Analysis")
 
     with st.spinner("Computing band powers…"):
-        bands = calculate_band_powers(data_for_cog)
+        # If we have extracted features/epochs, use them for a much cleaner average
+        if af in st.session_state.feature_df:
+            # Reconstruct average powers from the feature matrix (which already has noise segments removed)
+            df_feat = st.session_state.feature_df[af]
+            bands = {
+                'Delta': df_feat['global_delta_rel'].mean() * 100,
+                'Theta': df_feat['global_theta_rel'].mean() * 100,
+                'Alpha': df_feat['global_alpha_rel'].mean() * 100,
+                'Beta':  df_feat['global_beta_rel'].mean() * 100,
+                'Gamma': df_feat['global_gamma_rel'].mean() * 100,
+            }
+        else:
+            bands = calculate_band_powers(data_for_cog)
+    
     cog_label, cog_emoji = infer_cognitive_state(bands)
 
     col_cog, col_bands = st.columns([1, 2])
@@ -802,6 +1000,56 @@ with tab_exp:
             mime="text/csv",
             use_container_width=True,
         )
+
+    # ── ML Exports ──
+    if af in st.session_state.feature_df:
+        section_head("ML Data Export")
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
+            st.markdown(f"""
+            <div class="nf-metric" style="text-align:left;">
+                <div class="nf-metric-label">Feature Matrix</div>
+                <div style="font-size:0.85rem;color:#8b949e;margin:0.4rem 0;">
+                    Complete CSV with all ~370<br>features extracted per epoch.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            feat_csv = st.session_state.feature_df[af].to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label=f"📥 Download {stem}_features.csv",
+                data=feat_csv,
+                file_name=f"{stem}_features.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col_m2:
+            if af in st.session_state.cluster_results:
+                st.markdown(f"""
+                <div class="nf-metric" style="text-align:left;">
+                    <div class="nf-metric-label">Clustered Results</div>
+                    <div style="font-size:0.85rem;color:#8b949e;margin:0.4rem 0;">
+                        Features + Cluster IDs +<br>Interpreted Cognitive States.
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                c_res = st.session_state.cluster_results[af]
+                df_clus = st.session_state.feature_df[af].copy()
+                df_clus['cluster_id'] = c_res['labels']
+                df_clus['cognitive_state'] = [c_res['map'][l] for l in c_res['labels']]
+                
+                clus_csv = df_clus.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label=f"📥 Download {stem}_clustered.csv",
+                    data=clus_csv,
+                    file_name=f"{stem}_clustered.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                st.info("Run clustering to enable interpreted export.")
 
     # ── Plot export ──
     section_head("Export Plots (PNG)")
