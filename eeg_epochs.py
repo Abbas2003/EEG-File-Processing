@@ -8,25 +8,23 @@ def create_fixed_epochs(raw: mne.io.Raw, duration: float = 4.0, overlap: float =
     - duration: length of each window in seconds
     - overlap: step size = duration - overlap
     """
-    # 1. MNE Automatic Method (Commented out for testing)
-    # raw_temp = raw.copy()
-    # raw_temp.set_annotations(None)
-    # events = mne.make_fixed_length_events(raw_temp, duration=duration, overlap=overlap)
+    # 1. MNE Automatic Method
+    raw_temp = raw.copy()
+    raw_temp.set_annotations(None)
+    events = mne.make_fixed_length_events(raw_temp, duration=duration, overlap=overlap)
+    attempted_count = len(events)
     
-    # 2. Manual Generator
-    sfreq = raw.info['sfreq']
-    total_duration = raw.times[-1]
-    step = duration - overlap
-    
-    # Create events array: [sample_index, 0, event_id]
-    event_list = []
-    current_time = 0.0
-    while (current_time + duration) <= total_duration:
-        sample_idx = int(current_time * sfreq) + raw.first_samp
-        event_list.append([sample_idx, 0, 1])
-        current_time += step
-        
-    events = np.array(event_list)
+    # 2. Manual Generator (Commented out)
+    # sfreq = raw.info['sfreq']
+    # total_duration = raw.times[-1]
+    # step = duration - overlap
+    # event_list = []
+    # current_time = 0.0
+    # while (current_time + duration) <= total_duration:
+    #     sample_idx = int(current_time * sfreq) + raw.first_samp
+    #     event_list.append([sample_idx, 0, 1])
+    #     current_time += step
+    # events = np.array(event_list)
     
     # Create epochs
     epochs = mne.Epochs(
@@ -35,7 +33,7 @@ def create_fixed_epochs(raw: mne.io.Raw, duration: float = 4.0, overlap: float =
         on_missing='ignore', reject_by_annotation=False
     )
     
-    return epochs, len(event_list)
+    return epochs, attempted_count
 
 def reject_bad_epochs(epochs: mne.Epochs, threshold_uv: float = 150.0) -> mne.Epochs:
     """
@@ -69,7 +67,8 @@ def get_epoch_summary(epochs: mne.Epochs, attempted: int = 0) -> dict:
         "kept_epochs": kept,
         "dropped_epochs": dropped,
         "rejection_rate_pct": round(rejection_rate, 2),
-        "drop_reasons": ", ".join(unique_reasons)
+        "drop_reasons": ", ".join(unique_reasons),
+        "selection": epochs.selection.tolist() if hasattr(epochs, 'selection') else list(range(kept))
     }
 
 def epochs_to_array(epochs: mne.Epochs) -> tuple[np.ndarray, list[float]]:

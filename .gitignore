@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Streamlit
+.streamlit/
+! .streamlit/config.toml
+
+# Data Files (Ignoring large EEG/CSV files)
+*.edf
+*.bdf
+*.set
+*.fdt
+*.csv
+# If you want to keep some CSVs, you can use: !important_data.csv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Agent/Debug
+.antigravity/
+.gemini/
+logs/
+trace.json
