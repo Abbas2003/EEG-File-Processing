@@ -56,7 +56,7 @@ def load_raw_data(file_path: str) -> mne.io.Raw:
         # fall back: take first 14 channels whatever they're called
         existing = raw.ch_names[:14]
 
-    raw.pick_channels(existing)
+    raw.pick(existing)
     raw.set_channel_types({ch: 'eeg' for ch in existing})
 
     try:
@@ -88,25 +88,53 @@ def run_ica_analysis(
     raw: mne.io.Raw,
     n_components: int | None = None,
     threshold: float = 2.5,
-) -> mne.preprocessing.ICA:
-    """Fit ICA and flag ocular / muscle artifact components."""
+) -> tuple[mne.preprocessing.ICA, list[dict]]:
+    """Fit ICA and flag ocular / muscle artifact components. Returns (ica, report)."""
     n_comp = n_components or min(len(raw.ch_names), 15)
     ica = mne.preprocessing.ICA(
         n_components=n_comp, random_state=97, method='fastica', verbose=False
     )
     ica.fit(raw, verbose=False)
 
+    ica_report = []
+    exclude = []
+
+    # 1. Detect Eye Blinks via Frontal Channels
     frontal = [ch for ch in ['AF3', 'AF4', 'F7', 'F8'] if ch in raw.ch_names]
     if frontal:
         try:
             eog_idx, _ = ica.find_bads_eog(
-                raw, ch_name=frontal, threshold=threshold, verbose=False
+                raw, ch_name=frontal[0], threshold=threshold, verbose=False
             )
-            ica.exclude = eog_idx
+            for idx in eog_idx:
+                if idx not in exclude:
+                    exclude.append(idx)
+                    ica_report.append({
+                        "Component": f"ICA{idx:03}",
+                        "Type": "EOG / Eye Blink",
+                        "Reason": f"High correlation with frontal channel {frontal[0]}",
+                        "Confidence": "High"
+                    })
         except Exception:
             pass
 
-    return ica
+    # 2. Detect Muscle / High Variance Artifacts (Heuristic)
+    sources = ica.get_sources(raw).get_data()
+    for i in range(ica.n_components_):
+        if i not in exclude:
+            # Check for high-frequency burst / variance spikes
+            z_score = np.abs(sources[i].std() / sources.std())
+            if z_score > threshold * 1.5:
+                exclude.append(i)
+                ica_report.append({
+                    "Component": f"ICA{i:03}",
+                    "Type": "EMG / Muscle Noise",
+                    "Reason": f"High statistical variance (Z={z_score:.1f})",
+                    "Confidence": "Medium"
+                })
+
+    ica.exclude = exclude
+    return ica, ica_report
 
 
 def get_cleaned_data(raw: mne.io.Raw, ica: mne.preprocessing.ICA) -> mne.io.Raw:
@@ -124,11 +152,11 @@ def full_pipeline(
     notch_freq: float = 50.0,
     ica_threshold: float = 2.5,
 ):
-    """One-shot preprocessing: filter → ICA → clean. Returns (raw_clean, ica)."""
+    """One-shot preprocessing: filter → ICA → clean. Returns (raw_clean, ica, ica_report)."""
     raw_f = apply_filtering(raw, l_freq, h_freq, notch_freq)
-    ica   = run_ica_analysis(raw_f, threshold=ica_threshold)
+    ica, ica_report = run_ica_analysis(raw_f, threshold=ica_threshold)
     raw_c = get_cleaned_data(raw_f, ica)
-    return raw_c, ica
+    return raw_c, ica, ica_report
 
 
 # ──────────────────────────────────────────────
@@ -317,6 +345,60 @@ def get_channel_stats(raw: mne.io.Raw) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def check_signal_quality(raw: mne.io.Raw) -> dict:
+    """
+    Assess EEG signal quality.
+    Returns dict with quality metrics per channel.
+    """
+    data = raw.get_data() * 1e6  # to µV
+    sfreq = raw.info['sfreq']
+    quality_report = {}
+
+    for i, ch in enumerate(raw.ch_names):
+        ch_data = data[i]
+        
+        # 1. Flatline detection (std < 0.1 µV)
+        is_flat = np.std(ch_data) < 0.1
+        
+        # 2. Clipping detection (values hitting extreme ranges)
+        # Assuming typical consumer EEG max range is around 1000 µV
+        is_clipped = np.any(np.abs(ch_data) > 800)
+        
+        # 3. Simple SNR estimation (Signal to Noise Ratio)
+        # Using variance ratio as a proxy
+        ch_var = np.var(ch_data)
+        
+        status = "Good"
+        if is_flat: status = "Flatline"
+        elif is_clipped: status = "Clipped / Noisy"
+        
+        quality_report[ch] = {
+            "status": status,
+            "std_uv": round(np.std(ch_data), 2),
+            "is_flat": is_flat,
+            "is_clipped": is_clipped
+        }
+        
+    return quality_report
+
+
+def get_preprocessing_report(raw_raw: mne.io.Raw, raw_clean: mne.io.Raw, ica: mne.preprocessing.ICA) -> dict:
+    """Generate a summary report of the preprocessing impact."""
+    # SNR Improvement proxy: ratio of RMS reduction (artifacts removed)
+    rms_raw = np.sqrt(np.mean((raw_raw.get_data() * 1e6)**2))
+    rms_clean = np.sqrt(np.mean((raw_clean.get_data() * 1e6)**2))
+    
+    improvement = ((rms_raw - rms_clean) / rms_raw) * 100 if rms_raw > 0 else 0
+    
+    return {
+        "artifact_components_removed": len(ica.exclude),
+        "rms_reduction_pct": round(improvement, 2),
+        "total_channels": len(raw_raw.ch_names),
+        "sfreq": int(raw_raw.info['sfreq']),
+        "duration_sec": round(raw_raw.times[-1], 2)
+    }
+
+
 def infer_cognitive_state(band_powers: dict[str, float]) -> tuple[str, str]:
     """Heuristic dominant-band cognitive label + emoji."""
     dominant = max(band_powers, key=band_powers.get)
@@ -377,6 +459,5 @@ def export_csv(raw: mne.io.Raw) -> bytes:
     df = raw.to_data_frame()
     df['time_ms'] = df['time'] * 1e3
     eeg_cols = [c for c in df.columns if c not in ['time', 'time_ms']]
-    # df[eeg_cols] = df[eeg_cols] * 1e6
-    print(df[eeg_cols])
+    df[eeg_cols] = df[eeg_cols] * 1e6
     return df[['time_ms'] + eeg_cols].to_csv(index=False).encode('utf-8')

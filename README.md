@@ -1,80 +1,41 @@
-# NeuroFlow — EEG Preprocessing & Analysis Dashboard
+# NeuroFlow — Unsupervised EEG Cognitive Analysis
 
-A production-grade EEG analysis tool built with Streamlit and MNE-Python.
+NeuroFlow is a production-grade EEG analysis suite built with Streamlit, MNE-Python, and Scikit-Learn. It allows you to transform raw EEG data into actionable cognitive insights using unsupervised machine learning.
 
-## Features
+## Key Features
 
-- **Multi-file upload** — drop multiple EDF files and switch between them instantly
-- **Full preprocessing pipeline** — bandpass filter → notch filter → ICA artifact removal → average re-reference
-- **Configurable parameters** — adjust all filter frequencies and ICA threshold from the sidebar
-- **Cognitive state analysis** — frequency band power distribution with dominant-state inference
-- **Topographic maps** — interactive scalp potential maps with a time slider
-- **Export everything**
-  - ✅ Clean EDF file
-  - ✅ Excel workbook (3 sheets: time-series, channel stats, band powers)
-  - ✅ CSV (flat µV time-series)
-  - ✅ PNG plots (PSD, time-series, topomap)
-  - ✅ Batch ZIP export for multiple files
+- **Full Preprocessing Pipeline** — Bandpass filter → Notch filter → ICA artifact removal → Average re-reference.
+- **Signal Quality Guard** — Real-time detection of flatlines, clipping, and SNR improvement reporting.
+- **Automated Epoching** — High-resolution segmentation into 4-second windows with 50% overlap.
+- **Deep Feature Extraction** — Extracts ~370 features per epoch (Statistical, Hjorth, Spectral Entropy, Band Ratios, Frontal Asymmetry).
+- **Unsupervised Discovery** — Automatically clusters unlabeled EEG data to discover patterns matching Focused, Distracted, and Anxious states.
+- **Cognitive Timeline** — Visualize state transitions over time in a Gantt-style chart.
+- **Advanced Export** — Export clean EDFs, Feature Matrices (CSV), and Clustered Results with interpreted labels.
 
----
-
-## Local Setup
+## Installation
 
 ```bash
-# 1. Clone / copy files into a folder
-# 2. Create a virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# 4. Run the app
-streamlit run app.py
+# Run the dashboard
+streamlit run streamlit_app.py
 ```
 
-The app will open at `http://localhost:8501`.
+## Scientific Foundation
 
----
-
-## Free Hosting Options
-
-### Option A — Hugging Face Spaces ⭐ Recommended
-Best free RAM headroom for heavy scientific libraries like MNE.
-
-1. Create an account at https://huggingface.co
-2. New Space → SDK: **Streamlit** → Public
-3. Upload `app.py`, `eeg_pipeline.py`, `requirements.txt`
-4. Your app is live at `https://huggingface.co/spaces/<username>/<space-name>`
-
-### Option B — Streamlit Community Cloud
-1. Push files to a **public GitHub repo**
-2. Go to https://share.streamlit.io → New app → point to `app.py`
-3. Live at `https://<yourapp>.streamlit.app`
-> ⚠️ Free tier has ~1 GB RAM — MNE can be heavy with long recordings.
-
-### Option C — Render.com
-More control; good for larger files.
-1. Add a `render.yaml` or use the web service wizard
-2. Build command: `pip install -r requirements.txt`
-3. Start command: `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`
-
----
+- **Frontal Alpha Asymmetry (FAA)**: Used as a proxy for emotional valence and approach/withdrawal motivation.
+- **Engagement Index**: Calculated as `Beta / (Alpha + Theta)`, a validated measure of cognitive focus.
+- **Hjorth Parameters**: Quantify signal activity, mobility, and complexity.
+- **Fractal Dimension**: Measures signal self-similarity using the Higuchi method.
 
 ## File Structure
 
 ```
-├── app.py              ← Streamlit UI (main entry point)
-├── eeg_pipeline.py     ← All EEG processing logic (MNE)
-├── requirements.txt    ← Python dependencies
-└── README.md
+├── streamlit_app.py   ← Main UI & Dashboard
+├── eeg_pipeline.py    ← Core MNE processing & quality metrics
+├── eeg_epochs.py      ← Fixed-length segmentation logic
+├── eeg_features.py    ← 370+ feature extraction algorithms
+├── eeg_clustering.py  ← ML clustering & interpretation logic
+└── requirements.txt   ← Python dependencies
 ```
-
----
-
-## EDF Channel Support
-
-The app expects EMOTIV EPOC X channels by default:
-`AF3, F7, F3, FC5, T7, P7, O1, O2, P8, T8, FC6, F4, F8, AF4`
-
-If your EDF uses different channel names, the app automatically falls back to the first 14 channels found.
